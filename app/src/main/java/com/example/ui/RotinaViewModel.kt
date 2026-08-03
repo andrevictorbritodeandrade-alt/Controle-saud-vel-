@@ -27,12 +27,23 @@ data class HistorySummary(
     val sleepNotes: String?
 )
 
+sealed interface GeminiTipUiState {
+    object Loading : GeminiTipUiState
+    data class Success(val tip: String) : GeminiTipUiState
+    data class Error(val message: String) : GeminiTipUiState
+}
+
 class RotinaViewModel(application: Application) : AndroidViewModel(application) {
     private val repository: RotinaRepository
+    private val geminiService = GeminiService()
+
+    private val _geminiTipState = MutableStateFlow<GeminiTipUiState>(GeminiTipUiState.Loading)
+    val geminiTipState: StateFlow<GeminiTipUiState> = _geminiTipState.asStateFlow()
 
     init {
         val db = AppDatabase.getDatabase(application)
         repository = RotinaRepository(db)
+        refreshGeminiTip()
     }
 
     // Selected Date & Weekday State
@@ -317,5 +328,21 @@ class RotinaViewModel(application: Application) : AndroidViewModel(application) 
 
         val durationStr = "${durationHours}h${durationMins}min"
         return Pair(latencyMin, durationStr)
+    }
+
+    fun refreshGeminiTip() {
+        viewModelScope.launch {
+            _geminiTipState.value = GeminiTipUiState.Loading
+            try {
+                val day = _selectedDayOfWeek.value
+                val tasks = tasksForSelectedDay.value
+                val completed = tasks.count { it.progress?.completed == true }
+                val total = tasks.size
+                val tip = geminiService.fetchDailyCortisolTip(day, completed, total)
+                _geminiTipState.value = GeminiTipUiState.Success(tip)
+            } catch (e: Exception) {
+                _geminiTipState.value = GeminiTipUiState.Success("💡 Mantenha a consistência na exposição solar matinal e higiene do sono para regular seu cortisol.")
+            }
+        }
     }
 }

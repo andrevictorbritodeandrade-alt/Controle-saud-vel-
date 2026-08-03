@@ -32,6 +32,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -83,6 +84,7 @@ fun RotinaApp(viewModel: RotinaViewModel) {
     val sleepRecord by viewModel.sleepRecordForSelectedDay.collectAsStateWithLifecycle()
     val alarms by viewModel.activeAlarms.collectAsStateWithLifecycle()
     val history by viewModel.historySummaries.collectAsStateWithLifecycle()
+    val geminiTipState by viewModel.geminiTipState.collectAsStateWithLifecycle()
 
     val selectedDate by viewModel.selectedDate.collectAsStateWithLifecycle()
     val selectedDayOfWeek by viewModel.selectedDayOfWeek.collectAsStateWithLifecycle()
@@ -166,6 +168,14 @@ fun RotinaApp(viewModel: RotinaViewModel) {
             ) {
                 // Main Biological Banner Header
                 HeaderBanner()
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Gemini Daily Cortisol Reduction Tip Card
+                GeminiDailyTipCard(
+                    geminiTipState = geminiTipState,
+                    onRefresh = { viewModel.refreshGeminiTip() }
+                )
 
                 Spacer(modifier = Modifier.height(16.dp))
 
@@ -281,6 +291,125 @@ fun HeaderBanner() {
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold
                 )
+            }
+        }
+    }
+}
+
+@Composable
+fun GeminiDailyTipCard(
+    geminiTipState: GeminiTipUiState,
+    onRefresh: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("gemini_tip_card"),
+        colors = CardDefaults.cardColors(containerColor = SlateCardBg),
+        border = BorderStroke(1.5.dp, Brush.horizontalGradient(listOf(EmeraldPrimary, Color(0xFF38BDF8))))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .clip(CircleShape)
+                            .background(EmeraldPrimary.copy(alpha = 0.2f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = "Gemini AI",
+                            tint = Color(0xFFFBBF24),
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+                    Text(
+                        text = "Dica Diária • Cortisol",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp
+                    )
+                    Surface(
+                        color = EmeraldPrimary.copy(alpha = 0.2f),
+                        shape = RoundedCornerShape(4.dp)
+                    ) {
+                        Text(
+                            text = "GEMINI IA",
+                            color = EmeraldLight,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+
+                IconButton(
+                    onClick = onRefresh,
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Regerar Dica",
+                        tint = TextGray,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            when (geminiTipState) {
+                is GeminiTipUiState.Loading -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            color = EmeraldPrimary,
+                            strokeWidth = 2.dp
+                        )
+                        Text(
+                            text = "Consultando IA Gemini para personalizar seu dia...",
+                            color = TextGray,
+                            fontSize = 12.sp,
+                            fontStyle = FontStyle.Italic
+                        )
+                    }
+                }
+                is GeminiTipUiState.Success -> {
+                    Text(
+                        text = geminiTipState.tip,
+                        color = Color(0xFFE2E8F0),
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp,
+                        fontWeight = FontWeight.Normal
+                    )
+                }
+                is GeminiTipUiState.Error -> {
+                    Text(
+                        text = "💡 Mantenha a consistência na exposição solar matinal e rotina de sono para estabilizar seu cortisol.",
+                        color = Color(0xFFE2E8F0),
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp
+                    )
+                }
             }
         }
     }
@@ -416,9 +545,9 @@ fun ChecklistTab(
     // Modal dialog to input time and notes for task completion
     if (taskToLog != null) {
         val currentTask = taskToLog!!
-        var completedTime by remember {
-            val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
-            mutableStateOf(sdf.format(Date()))
+        val nowTime = remember { SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date()) }
+        var completedTime by remember(currentTask) {
+            mutableStateOf(currentTask.targetTime ?: nowTime)
         }
         var observations by remember { mutableStateOf("") }
 
@@ -473,8 +602,42 @@ fun ChecklistTab(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(text = completedTime, color = Color.White, fontWeight = FontWeight.SemiBold)
+                        Text(text = completedTime, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                         Icon(imageVector = Icons.Default.AccessTime, contentDescription = "Pick Time", tint = EmeraldPrimary)
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Quick action buttons: Current time vs Target time
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                completedTime = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+                            },
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = EmeraldLight),
+                            border = BorderStroke(1.dp, if (completedTime == nowTime) EmeraldPrimary else BorderGray),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(text = "🕒 Hora atual ($nowTime)", fontSize = 11.sp, maxLines = 1)
+                        }
+
+                        if (currentTask.targetTime != null) {
+                            OutlinedButton(
+                                onClick = {
+                                    completedTime = currentTask.targetTime
+                                },
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFBBF24)),
+                                border = BorderStroke(1.dp, if (completedTime == currentTask.targetTime) Color(0xFFFBBF24) else BorderGray),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(text = "🎯 Hora prevista (${currentTask.targetTime})", fontSize = 11.sp, maxLines = 1)
+                            }
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(12.dp))
