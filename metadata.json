@@ -1,0 +1,6 @@
+{
+  "name": "Rotina Saudável",
+  "description": "Protocolo de otimização biológica para redução de cortisol, com controle de tarefas diárias, lembretes, hidratação e sono.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
