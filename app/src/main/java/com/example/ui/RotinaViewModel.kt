@@ -27,6 +27,26 @@ data class HistorySummary(
     val sleepNotes: String?
 )
 
+data class MonthlyDayLog(
+    val date: String,            // format "yyyy-MM-dd"
+    val displayDate: String,     // format "dd/MM/yyyy"
+    val dayOfMonth: Int,
+    val isExecuted: Boolean,
+    val executedCountSoFar: Int,
+    val totalDaysInMonth: Int,
+    val completedTasks: Int,
+    val totalTasks: Int
+)
+
+data class MonthlyEvolutionSummary(
+    val yearMonth: String,       // format "yyyy-MM", e.g. "2026-08"
+    val monthName: String,       // format "Agosto de 2026"
+    val totalDaysInMonth: Int,   // e.g. 31
+    val daysExecutedCount: Int,  // total executed days in month
+    val progressPercent: Float,  // percentage 0..100
+    val dailyLogs: List<MonthlyDayLog>
+)
+
 sealed interface GeminiTipUiState {
     object Loading : GeminiTipUiState
     data class Success(val tip: String) : GeminiTipUiState
@@ -135,6 +155,17 @@ class RotinaViewModel(application: Application) : AndroidViewModel(application) 
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = emptyList()
     )
+
+    // Reactively compute Monthly Evolution Summaries for Progression Bars
+    val monthlyEvolutionSummaries: StateFlow<List<MonthlyEvolutionSummary>> = historySummaries
+        .map { summaries ->
+            calculateMonthlyEvolutionSummaries(summaries)
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList()
+        )
 
     // Actions
     fun setSelectedDay(dayName: String) {
@@ -344,5 +375,81 @@ class RotinaViewModel(application: Application) : AndroidViewModel(application) 
                 _geminiTipState.value = GeminiTipUiState.Success("💡 Mantenha a consistência na exposição solar matinal e higiene do sono para regular seu cortisol.")
             }
         }
+    }
+
+    private fun calculateMonthlyEvolutionSummaries(historySummaries: List<HistorySummary>): List<MonthlyEvolutionSummary> {
+        val sdfFull = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+        val sdfDisplay = SimpleDateFormat("dd/MM/yyyy", Locale.getDefault())
+        val monthFormatter = SimpleDateFormat("MMMM 'de' yyyy", Locale("pt", "BR"))
+
+        val todayDateStr = _selectedDate.value
+
+        val monthsSet = mutableSetOf<String>()
+        if (todayDateStr.length >= 7) {
+            monthsSet.add(todayDateStr.take(7))
+        }
+        historySummaries.forEach { summary ->
+            if (summary.date.length >= 7) {
+                monthsSet.add(summary.date.take(7))
+            }
+        }
+
+        val summariesMap = historySummaries.associateBy { it.date }
+
+        return monthsSet.mapNotNull { yearMonth ->
+            try {
+                val cal = Calendar.getInstance()
+                val parts = yearMonth.split("-")
+                val year = parts[0].toInt()
+                val month = parts[1].toInt() - 1 // 0-indexed in Calendar
+                cal.set(year, month, 1, 0, 0, 0)
+
+                val maxDaysInMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH)
+                val monthName = monthFormatter.format(cal.time).replaceFirstChar { it.uppercase() }
+
+                val logs = mutableListOf<MonthlyDayLog>()
+                var executedCount = 0
+
+                for (day in 1..maxDaysInMonth) {
+                    cal.set(Calendar.DAY_OF_MONTH, day)
+                    val dateKey = sdfFull.format(cal.time)
+                    val displayDate = sdfDisplay.format(cal.time)
+
+                    val summary = summariesMap[dateKey]
+                    val isExecuted = (summary != null && summary.tasksCompletedCount > 0)
+                    if (isExecuted) {
+                        executedCount++
+                    }
+
+                    logs.add(
+                        MonthlyDayLog(
+                            date = dateKey,
+                            displayDate = displayDate,
+                            dayOfMonth = day,
+                            isExecuted = isExecuted,
+                            executedCountSoFar = executedCount,
+                            totalDaysInMonth = maxDaysInMonth,
+                            completedTasks = summary?.tasksCompletedCount ?: 0,
+                            totalTasks = summary?.totalTasksCount ?: 0
+                        )
+                    )
+                }
+
+                val percent = if (maxDaysInMonth > 0) {
+                    (executedCount.toFloat() / maxDaysInMonth.toFloat()) * 100f
+                } else 0f
+
+                MonthlyEvolutionSummary(
+                    yearMonth = yearMonth,
+                    monthName = monthName,
+                    totalDaysInMonth = maxDaysInMonth,
+                    daysExecutedCount = executedCount,
+                    progressPercent = percent,
+                    dailyLogs = logs
+                )
+            } catch (e: Exception) {
+                null
+            }
+        }.sortedByDescending { it.yearMonth }
     }
 }

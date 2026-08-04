@@ -30,6 +30,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontStyle
@@ -84,6 +85,7 @@ fun RotinaApp(viewModel: RotinaViewModel) {
     val sleepRecord by viewModel.sleepRecordForSelectedDay.collectAsStateWithLifecycle()
     val alarms by viewModel.activeAlarms.collectAsStateWithLifecycle()
     val history by viewModel.historySummaries.collectAsStateWithLifecycle()
+    val monthlyEvolutionSummaries by viewModel.monthlyEvolutionSummaries.collectAsStateWithLifecycle()
     val geminiTipState by viewModel.geminiTipState.collectAsStateWithLifecycle()
 
     val selectedDate by viewModel.selectedDate.collectAsStateWithLifecycle()
@@ -223,6 +225,7 @@ fun RotinaApp(viewModel: RotinaViewModel) {
                         )
                         AppTab.HISTORICO -> HistoryTab(
                             historySummaries = history,
+                            monthlyEvolutionSummaries = monthlyEvolutionSummaries,
                             onSelectDate = {
                                 viewModel.setSelectedDate(it)
                                 activeTab = AppTab.TAREFAS
@@ -1457,23 +1460,72 @@ fun SleepTab(
             Column(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // Bedtime Input row
-                SleepTimeRow(
-                    label = "🛏️ Deitou às:",
-                    timeValue = bedtime,
-                    onPickTime = {
-                        val parts = bedtime.split(":")
-                        val h = parts.getOrNull(0)?.toIntOrNull() ?: 22
-                        val m = parts.getOrNull(1)?.toIntOrNull() ?: 0
-                        TimePickerDialog(context, { _, hour, min ->
-                            bedtime = String.format(Locale.getDefault(), "%02d:%02d", hour, min)
-                        }, h, m, true).show()
+                // Bedtime Input row (Primary metric requested by user)
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    SleepTimeRow(
+                        label = "🛏️ Deitou às (Hora na cama):",
+                        timeValue = bedtime,
+                        onPickTime = {
+                            val parts = bedtime.split(":")
+                            val h = parts.getOrNull(0)?.toIntOrNull() ?: 22
+                            val m = parts.getOrNull(1)?.toIntOrNull() ?: 0
+                            TimePickerDialog(context, { _, hour, min ->
+                                bedtime = String.format(Locale.getDefault(), "%02d:%02d", hour, min)
+                            }, h, m, true).show()
+                        }
+                    )
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    // Quick buttons for Bedtime (e.g., 22:00, 22:30, 23:00)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { bedtime = "22:00" },
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = if (bedtime == "22:00") PurpleSleep.copy(alpha = 0.3f) else Color.Transparent,
+                                contentColor = PurpleSleepLight
+                            ),
+                            border = BorderStroke(1.dp, if (bedtime == "22:00") PurpleSleepLight else BorderGray),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Deitei 22:00", fontSize = 11.sp, maxLines = 1)
+                        }
+
+                        OutlinedButton(
+                            onClick = { bedtime = "22:30" },
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = if (bedtime == "22:30") PurpleSleep.copy(alpha = 0.3f) else Color.Transparent,
+                                contentColor = PurpleSleepLight
+                            ),
+                            border = BorderStroke(1.dp, if (bedtime == "22:30") PurpleSleepLight else BorderGray),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Deitei 22:30", fontSize = 11.sp, maxLines = 1)
+                        }
+
+                        OutlinedButton(
+                            onClick = { bedtime = "23:00" },
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = if (bedtime == "23:00") PurpleSleep.copy(alpha = 0.3f) else Color.Transparent,
+                                contentColor = PurpleSleepLight
+                            ),
+                            border = BorderStroke(1.dp, if (bedtime == "23:00") PurpleSleepLight else BorderGray),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Deitei 23:00", fontSize = 11.sp, maxLines = 1)
+                        }
                     }
-                )
+                }
 
                 // SleepTime Input row
                 SleepTimeRow(
-                    label = "💤 Dormiu às:",
+                    label = "💤 Estimativa que adormeceu:",
                     timeValue = sleepTime,
                     onPickTime = {
                         val parts = sleepTime.split(":")
@@ -1676,16 +1728,549 @@ fun SleepAnalysisCard(record: com.example.data.SleepEntity) {
 }
 
 // -------------------------------------------------------------
-// HISTÓRICO TAB (AGGREGATED HISTORY)
+// HISTÓRICO TAB & WEEKLY CORTISOL PROGRESS CHART
 // -------------------------------------------------------------
+data class WeeklyDayStat(
+    val dayName: String,
+    val shortLabel: String,
+    val completionPercent: Float,
+    val tasksDone: Int,
+    val totalTasks: Int
+)
+
+@Composable
+fun WeeklyCortisolProgressChart(
+    historySummaries: List<HistorySummary>,
+    modifier: Modifier = Modifier
+) {
+    val daysOfWeek = listOf(
+        Pair("Segunda", "Seg"),
+        Pair("Terça", "Ter"),
+        Pair("Quarta", "Qua"),
+        Pair("Quinta", "Qui"),
+        Pair("Sexta", "Sex"),
+        Pair("Sábado", "Sáb"),
+        Pair("Domingo", "Dom")
+    )
+
+    val weeklyData = remember(historySummaries) {
+        daysOfWeek.map { (fullName, shortLabel) ->
+            val match = historySummaries.find { it.dayOfWeek.equals(fullName, ignoreCase = true) }
+            val percent = if (match != null && match.totalTasksCount > 0) {
+                (match.tasksCompletedCount.toFloat() / match.totalTasksCount.toFloat()) * 100f
+            } else {
+                0f
+            }
+            WeeklyDayStat(
+                dayName = fullName,
+                shortLabel = shortLabel,
+                completionPercent = percent,
+                tasksDone = match?.tasksCompletedCount ?: 0,
+                totalTasks = match?.totalTasksCount ?: 0
+            )
+        }
+    }
+
+    val avgPercent = remember(weeklyData) {
+        val nonZero = weeklyData.map { it.completionPercent }
+        if (nonZero.isNotEmpty()) nonZero.average().toInt() else 0
+    }
+
+    val activeDaysCount = remember(weeklyData) {
+        weeklyData.count { it.completionPercent > 0f }
+    }
+
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("weekly_progress_chart_card"),
+        colors = CardDefaults.cardColors(containerColor = SlateCardBg),
+        border = BorderStroke(1.5.dp, Brush.horizontalGradient(listOf(EmeraldPrimary, Color(0xFF3B82F6)))),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            // Header Row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(text = "📈", fontSize = 18.sp)
+                        Text(
+                            text = "Cumprimento Semanal",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp
+                        )
+                    }
+                    Text(
+                        text = "Progresso em Redução de Cortisol",
+                        color = TextGray,
+                        fontSize = 11.sp
+                    )
+                }
+
+                Surface(
+                    color = EmeraldPrimary.copy(alpha = 0.15f),
+                    shape = RoundedCornerShape(20.dp),
+                    border = BorderStroke(1.dp, EmeraldPrimary.copy(alpha = 0.4f))
+                ) {
+                    Text(
+                        text = "Média $avgPercent%",
+                        color = EmeraldLight,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Canvas Chart Container
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(180.dp)
+                    .background(DeepSlateBg.copy(alpha = 0.7f), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val canvasWidth = size.width
+                    val canvasHeight = size.height
+
+                    val bottomPadding = 30.dp.toPx()
+                    val topPadding = 25.dp.toPx()
+                    val chartHeight = canvasHeight - bottomPadding - topPadding
+
+                    val stepX = canvasWidth / (weeklyData.size)
+
+                    // Draw horizontal grid reference lines (0%, 50%, 100%)
+                    val levels = listOf(0f, 0.5f, 1f)
+                    levels.forEach { level ->
+                        val y = topPadding + chartHeight * (1f - level)
+                        drawLine(
+                            color = BorderGray.copy(alpha = 0.3f),
+                            start = Offset(0f, y),
+                            end = Offset(canvasWidth, y),
+                            strokeWidth = 1.dp.toPx()
+                        )
+                    }
+
+                    val path = androidx.compose.ui.graphics.Path()
+                    val points = mutableListOf<Offset>()
+
+                    weeklyData.forEachIndexed { index, stat ->
+                        val centerX = (index + 0.5f) * stepX
+                        val barHeight = (stat.completionPercent / 100f) * chartHeight
+                        val topY = topPadding + chartHeight - barHeight
+
+                        points.add(Offset(centerX, topY))
+
+                        val barWidth = 18.dp.toPx()
+                        val leftX = centerX - barWidth / 2
+
+                        // Draw background track
+                        drawRoundRect(
+                            color = Color(0xFF334155).copy(alpha = 0.4f),
+                            topLeft = Offset(leftX, topPadding),
+                            size = Size(barWidth, chartHeight),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(6.dp.toPx())
+                        )
+
+                        // Draw filled bar with gradient if completion > 0
+                        if (stat.completionPercent > 0f) {
+                            drawRoundRect(
+                                brush = Brush.verticalGradient(
+                                    colors = listOf(
+                                        EmeraldLight,
+                                        EmeraldPrimary
+                                    ),
+                                    startY = topY,
+                                    endY = topPadding + chartHeight
+                                ),
+                                topLeft = Offset(leftX, topY),
+                                size = Size(barWidth, barHeight),
+                                cornerRadius = androidx.compose.ui.geometry.CornerRadius(6.dp.toPx())
+                            )
+                        }
+
+                        // Draw percentage text above bar
+                        drawContext.canvas.nativeCanvas.apply {
+                            val textPaint = android.graphics.Paint().apply {
+                                color = if (stat.completionPercent > 0f) android.graphics.Color.WHITE else android.graphics.Color.GRAY
+                                textSize = 10.dp.toPx()
+                                textAlign = android.graphics.Paint.Align.CENTER
+                                isFakeBoldText = true
+                            }
+                            drawText(
+                                "${stat.completionPercent.toInt()}%",
+                                centerX,
+                                (topY - 6.dp.toPx()).coerceAtLeast(14.dp.toPx()),
+                                textPaint
+                            )
+
+                            // Draw Day Label below bar
+                            val labelPaint = android.graphics.Paint().apply {
+                                color = android.graphics.Color.LTGRAY
+                                textSize = 11.dp.toPx()
+                                textAlign = android.graphics.Paint.Align.CENTER
+                            }
+                            drawText(
+                                stat.shortLabel,
+                                centerX,
+                                canvasHeight - 6.dp.toPx(),
+                                labelPaint
+                            )
+                        }
+                    }
+
+                    // Draw smooth connecting line path
+                    if (points.isNotEmpty()) {
+                        path.moveTo(points[0].x, points[0].y)
+                        for (i in 0 until points.size - 1) {
+                            val p1 = points[i]
+                            val p2 = points[i + 1]
+                            val cx = (p1.x + p2.x) / 2
+                            path.cubicTo(cx, p1.y, cx, p2.y, p2.x, p2.y)
+                        }
+
+                        drawPath(
+                            path = path,
+                            color = Color(0xFF38BDF8),
+                            style = Stroke(width = 2.dp.toPx())
+                        )
+
+                        // Draw points on top
+                        points.forEachIndexed { idx, point ->
+                            if (weeklyData[idx].completionPercent > 0f) {
+                                drawCircle(
+                                    color = EmeraldPrimary,
+                                    radius = 4.dp.toPx(),
+                                    center = point
+                                )
+                                drawCircle(
+                                    color = Color.White,
+                                    radius = 2.dp.toPx(),
+                                    center = point
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Footer summary metrics
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                ChartSummaryCard(
+                    icon = "🔥",
+                    label = "Dias Ativos",
+                    value = "$activeDaysCount / 7 dias",
+                    modifier = Modifier.weight(1f)
+                )
+
+                val statusLabel = when {
+                    avgPercent >= 80 -> "Otimizado 🌿"
+                    avgPercent >= 50 -> "Equilibrado ⚖️"
+                    else -> "Em Ajuste 🔄"
+                }
+
+                ChartSummaryCard(
+                    icon = "⚡",
+                    label = "Ritmo Circadiano",
+                    value = statusLabel,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun ChartSummaryCard(
+    icon: String,
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier,
+        color = DeepSlateBg,
+        shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(1.dp, BorderGray)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(text = icon, fontSize = 16.sp)
+            Column {
+                Text(text = label, color = TextGray, fontSize = 10.sp)
+                Text(text = value, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+@Composable
+fun MonthlyEvolutionProgressBarCard(
+    monthlySummaries: List<com.example.ui.MonthlyEvolutionSummary>,
+    modifier: Modifier = Modifier
+) {
+    if (monthlySummaries.isEmpty()) return
+
+    var selectedMonthIndex by remember { mutableStateOf(0) }
+    val currentSummary = monthlySummaries.getOrNull(selectedMonthIndex) ?: monthlySummaries.first()
+
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("monthly_evolution_card"),
+        colors = CardDefaults.cardColors(containerColor = SlateCardBg),
+        border = BorderStroke(1.5.dp, Brush.horizontalGradient(listOf(EmeraldPrimary, Color(0xFF6366F1)))),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            // Cloud Sync Badge & Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .clip(CircleShape)
+                            .background(EmeraldPrimary.copy(alpha = 0.2f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(text = "📅", fontSize = 14.sp)
+                    }
+                    Text(
+                        text = "Barra de Evolução Mensal",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp
+                    )
+                }
+
+                Surface(
+                    color = Color(0xFF0EA5E9).copy(alpha = 0.15f),
+                    shape = RoundedCornerShape(20.dp),
+                    border = BorderStroke(1.dp, Color(0xFF0EA5E9).copy(alpha = 0.4f))
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(text = "☁️", fontSize = 11.sp)
+                        Text(
+                            text = "FIREBASE NUVEM",
+                            color = Color(0xFF38BDF8),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 10.sp
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Month Title & Quick Switcher
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "Mês: ${currentSummary.monthName}",
+                        color = EmeraldLight,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp
+                    )
+                    Text(
+                        text = "Meta 30 dias para redução sustentável de cortisol",
+                        color = TextGray,
+                        fontSize = 11.sp
+                    )
+                }
+
+                if (monthlySummaries.size > 1) {
+                    IconButton(
+                        onClick = {
+                            selectedMonthIndex = (selectedMonthIndex + 1) % monthlySummaries.size
+                        },
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Mudar Mês",
+                            tint = TextGray
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Visual Progress Bar
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Dias executados: ${currentSummary.daysExecutedCount} de ${currentSummary.totalDaysInMonth}",
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp
+                    )
+                    Text(
+                        text = "${currentSummary.progressPercent.toInt()}% concluído",
+                        color = EmeraldPrimary,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Custom gradient progress bar track
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(14.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(DeepSlateBg)
+                        .border(1.dp, BorderGray, RoundedCornerShape(8.dp))
+                ) {
+                    val animatedProgressFraction = (currentSummary.progressPercent / 100f).coerceIn(0f, 1f)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(fraction = if (animatedProgressFraction > 0) animatedProgressFraction else 0.02f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(EmeraldPrimary, Color(0xFF38BDF8), Color(0xFF818CF8))
+                                )
+                            )
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Daily log breakdown formatted as requested by user
+            Text(
+                text = "📋 Registro diário de execução (${currentSummary.monthName}):",
+                color = TextGray,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 240.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                currentSummary.dailyLogs.forEach { log ->
+                    val statusBg = if (log.isExecuted) EmeraldPrimary.copy(alpha = 0.15f) else DeepSlateBg
+                    val statusBorder = if (log.isExecuted) EmeraldPrimary.copy(alpha = 0.5f) else BorderGray
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(statusBg)
+                            .border(1.dp, statusBorder, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = "Dia ${log.displayDate}",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                            Text(
+                                text = if (log.isExecuted) {
+                                    "dias executados ${log.executedCountSoFar} de ${log.totalDaysInMonth} feito"
+                                } else {
+                                    "dias executados ${log.executedCountSoFar} de ${log.totalDaysInMonth} (pendente)"
+                                },
+                                color = if (log.isExecuted) EmeraldLight else TextGray,
+                                fontSize = 11.sp
+                            )
+                        }
+
+                        Surface(
+                            color = if (log.isExecuted) EmeraldPrimary.copy(alpha = 0.2f) else BorderGray.copy(alpha = 0.2f),
+                            shape = RoundedCornerShape(6.dp)
+                        ) {
+                            Text(
+                                text = if (log.isExecuted) "✅ Feito" else "⏳ Pendente",
+                                color = if (log.isExecuted) EmeraldLight else TextGray,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 fun HistoryTab(
     historySummaries: List<HistorySummary>,
+    monthlyEvolutionSummaries: List<com.example.ui.MonthlyEvolutionSummary>,
     onSelectDate: (String) -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxWidth()
     ) {
+        // Monthly Evolution Progress Bar Card
+        MonthlyEvolutionProgressBarCard(monthlySummaries = monthlyEvolutionSummaries)
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        // Weekly Cortisol Reduction Progress Chart
+        WeeklyCortisolProgressChart(historySummaries = historySummaries)
+
+        Spacer(modifier = Modifier.height(20.dp))
+
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
